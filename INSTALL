@@ -1,0 +1,31 @@
+pg_log_authfail Install
+==========================
+
+To install pg_log_authfail, you should untar the pg_log_authfail tarball
+anywhere you want.
+
+You'll then need to compile it with pgxs. So the pg_config tool must be in your
+path. Depending on your PostgreSQL installation, you may need to install a dev
+package. Once pg_config is in your path, do "make", and then "make install".
+
+Once it's installed, you'll need to configure PostgreSQL to make use of it:
+
+* shared_preload_libraries='pg_log_authfail'
+
+There are also optional parameters. To configure them, with a PostgreSQL release
+older than 9.2, you first need to add the class of pg_log_authfail in
+custom_variable_classes:
+
+* custom_variable_classes = 'pg_log_authfail'
+
+In more recent release, custom_variable_classes is no longer available but you
+can still configure pg_log_authfail.
+
+You'll be able to set the two following parameters:
+
+* pg_log_authfail.log_destination: to choose the log destination (stderr or syslog).
+    If stderr is chosen, logs will be written in standard postgresql logs.
+* pg_log_authfail.syslog_facility: configure syslog_facility in case of syslog destination.
+* pg_log_authfail.syslog_ident: configure syslog_ident in case of syslog destination.
+
+Once this configuration is done, restart PostgreSQL.
