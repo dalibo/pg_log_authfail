@@ -1,6 +1,8 @@
 pg_log_authfail is a PostgreSQL module that logs each failed connection attempt
 in a fixed format and in a potentially specific file.
 
+**It requires PostgreSQL 9.1 or above.**
+
 The output format looks like :
 
     Failed authentication from X.X.X.X on port Y
