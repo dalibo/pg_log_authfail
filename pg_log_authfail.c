@@ -174,7 +174,13 @@ static void
 pglaf_log(const Port *port)
 {
 	char *tmp_authmsg = NULL;
-	char *localport = GetConfigOptionByName("port", NULL);
+	char *localport;
+
+#if PG_VERSION_NUM >= 90600
+	localport = GetConfigOptionByName("port", NULL, false);
+#else
+	localport = GetConfigOptionByName("port", NULL);
+#endif
 
 	Assert(port != NULL);
 
