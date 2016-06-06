@@ -197,7 +197,7 @@ pglaf_log(const Port *port)
 		if (openlog_done)
 			write_syslog(LOG_ERR, tmp_authmsg);
 		else
-			elog(LOG_ERR, "%s", tmp_authmsg);
+			elog(LOG, "%s", tmp_authmsg);
 
 		/* Free the log string */
 		pfree(tmp_authmsg);
