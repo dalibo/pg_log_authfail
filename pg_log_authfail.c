@@ -64,7 +64,7 @@ static bool    openlog_done = false;
 static char *  syslog_ident = NULL;
 static int     log_destination = 1; /* aka stderr */
 static int     syslog_facility = LOG_LOCAL0;
-static bool    Use_log_line_prefix = false; /* Don't */
+static bool    use_log_line_prefix = false; /* Don't */
 
 /* Saved hook values in case of unload */
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
@@ -142,8 +142,8 @@ _PG_init(void)
 	DefineCustomBoolVariable( "pg_log_authfail.use_log_line_prefix",
 				"Prefix log line as standart log output using pg_log_line_prefix.",
 				NULL,
-				&Use_log_line_prefix,
-				Use_log_line_prefix,
+				&use_log_line_prefix,
+				use_log_line_prefix,
 				PGC_POSTMASTER,
                                 0,
 #if PG_VERSION_NUM >= 90100
@@ -454,7 +454,7 @@ pglaf_log(Port *port)
 
 	Assert(port != NULL);
 
-	if (Use_log_line_prefix == true )
+	if (use_log_line_prefix == true )
 	{
 		pglaf_log_line(&tmp_authmsg, port);
 	}
