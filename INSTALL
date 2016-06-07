@@ -27,5 +27,6 @@ You'll be able to set the two following parameters:
     If stderr is chosen, logs will be written in standard postgresql logs.
 * pg_log_authfail.syslog_facility: configure syslog_facility in case of syslog destination.
 * pg_log_authfail.syslog_ident: configure syslog_ident in case of syslog destination.
+* pg_log_authfail.use_log_line_prefix: default to false but if true, preprend log_line_prefix to output.
 
 Once this configuration is done, restart PostgreSQL.

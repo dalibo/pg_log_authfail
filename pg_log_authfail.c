@@ -17,12 +17,16 @@
 #include "libpq/auth.h"   /* For ClientAuthentication hook	*/
 #include "libpq/libpq-be.h" /* For Port						*/
 #include "miscadmin.h"
+#include "lib/stringinfo.h"
+#include "pgtime.h"
 
 PG_MODULE_MAGIC;
 
 #ifndef PG_SYSLOG_LIMIT
 #define PG_SYSLOG_LIMIT 1024
 #endif
+
+#define FORMATTED_TS_LEN 128
 
 /*---- Local variables ----*/
 static const struct config_enum_entry log_destination_options[] = {
@@ -48,6 +52,7 @@ static bool    openlog_done = false;
 static char *  syslog_ident = NULL;
 static int     log_destination = 1; /* aka stderr */
 static int     syslog_facility = LOG_LOCAL0;
+static bool    use_log_line_prefix = false; /* Don't */
 
 /* Saved hook values in case of unload */
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
@@ -58,7 +63,7 @@ void		_PG_init(void);
 void		_PG_fini(void);
 
 static void pglaf_ClientAuthentication(Port *port, int status);
-static void pglaf_log(const Port *port);
+static void pglaf_log(Port *port);
 static void write_syslog(int level, char *line);
 
 extern int pg_mbcliplen(const char *mbstr, int len, int limit);
@@ -122,6 +127,19 @@ _PG_init(void)
 				NULL,
 				NULL );
 
+	DefineCustomBoolVariable( "pg_log_authfail.use_log_line_prefix",
+				"Prefix log line as standart log output using pg_log_line_prefix.",
+				NULL,
+				&use_log_line_prefix,
+				use_log_line_prefix,
+				PGC_SIGHUP,
+                                0,
+#if PG_VERSION_NUM >= 90100
+                                NULL,
+#endif
+                                NULL,
+                                NULL );
+
 	if (log_destination == 2 /* aka syslog */)
 	{
 		/* Open syslog descriptor */
@@ -154,6 +172,306 @@ _PG_fini(void)
 }
 
 /*
+ * Format tag info for log lines; append to the provided buffer.
+ * Copied from log_line_prefix in elog.c but using pg_log_authfail prefix
+ */
+static void
+pglaf_line_prefix(StringInfo buf, Port *port)
+{
+	/* static counter for line numbers */
+	static long	log_line_number = 0;
+
+	/* has counter been reset in current process? */
+	static int	log_my_pid = 0;
+	int		padding;
+	const char 	*p;
+
+	/*
+	 * This is one of the few places where we'd rather not inherit a static
+	 * variable's value from the postmaster.  But since we will, reset it when
+	 * MyProcPid changes. MyStartTime also changes when MyProcPid does, so
+	 * reset the formatted start timestamp too.
+	 */
+	if (log_my_pid != MyProcPid)
+	{
+		log_line_number = 0;
+		log_my_pid = MyProcPid;
+	}
+	log_line_number++;
+
+	if (Log_line_prefix == NULL)
+		return;					/* in case guc hasn't run yet */
+
+	for (p = Log_line_prefix; *p != '\0'; p++)
+	{
+		if (*p != '%')
+		{
+			/* literal char, just copy */
+			appendStringInfoChar(buf, *p);
+			continue;
+		}
+
+		/* must be a '%', so skip to the next char */
+		p++;
+		if (*p == '\0')
+			break;				/* format error - ignore it */
+		else if (*p == '%')
+		{
+			/* string contains %% */
+			appendStringInfoChar(buf, '%');
+			continue;
+		}
+
+
+		/*
+		 * Process any formatting which may exist after the '%'.
+		 *
+		 * Note: Since only '-', '0' to '9' are valid formatting characters we
+		 * can do a quick check here to pre-check for formatting. If the char
+		 * is not formatting then we can skip a useless function call.
+		 *
+		 * Further note: At least on some platforms, passing %*s rather than
+		 * %s to appendStringInfo() is substantially slower, so many of the
+		 * cases below avoid doing that unless non-zero padding is in fact
+		 * specified.
+		 */
+		if (*p > '9')
+			padding = 0;
+
+		/* process the option */
+		switch (*p)
+		{
+			case 'a':
+				if (port)
+				{
+					const char *appname = application_name;
+
+					if (appname == NULL || *appname == '\0')
+						appname = _("[unknown]");
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, appname);
+					else
+						appendStringInfoString(buf, appname);
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+
+				break;
+			case 'u':
+				if (port)
+				{
+					const char *username = port->user_name;
+
+					if (username == NULL || *username == '\0')
+						username = _("[unknown]");
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, username);
+					else
+						appendStringInfoString(buf, username);
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
+			case 'd':
+				if (port)
+				{
+					const char *dbname = port->database_name;
+
+					if (dbname == NULL || *dbname == '\0')
+						dbname = _("[unknown]");
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, dbname);
+					else
+						appendStringInfoString(buf, dbname);
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
+			case 'c':
+				if (padding != 0)
+				{
+					char        strfbuf[128];
+
+					snprintf(strfbuf, sizeof(strfbuf) - 1, "%lx.%x",
+						(long) (MyStartTime), MyProcPid);
+					appendStringInfo(buf, "%*s", padding, strfbuf);
+				}
+				else
+					appendStringInfo(buf, "%lx.%x", (long) (MyStartTime), MyProcPid);
+				break;
+			case 'p':
+				if (padding != 0)
+					appendStringInfo(buf, "%*d", padding, MyProcPid);
+				else
+					appendStringInfo(buf, "%d", MyProcPid);
+				break;
+			case 'l':
+				if (padding != 0)
+					appendStringInfo(buf, "%*ld", padding, log_line_number);
+				else
+					appendStringInfo(buf, "%ld", log_line_number);
+				break;
+			case 'm':
+				{
+					pg_time_t	stamp_time;
+					char		msbuf[8];
+					char		formatted_log_time[256];
+					struct timeval	stamp_timeval;
+
+					gettimeofday(&stamp_timeval, NULL);
+					stamp_time = (pg_time_t) stamp_timeval.tv_sec;
+					pg_strftime(formatted_log_time, FORMATTED_TS_LEN,
+						/* leave room for milliseconds... */
+						"%Y-%m-%d %H:%M:%S     %Z",
+						pg_localtime(&stamp_time, log_timezone));
+					/* 'paste' milliseconds into place... */
+					sprintf(msbuf, ".%03d", (int) (stamp_timeval.tv_usec / 1000));
+					memcpy(formatted_log_time + 19, msbuf, 4);
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, formatted_log_time);
+					else
+						appendStringInfoString(buf, formatted_log_time);
+				}
+				break;
+			case 't':
+				{
+					pg_time_t	stamp_time = (pg_time_t) time(NULL);
+					char		strfbuf[128];
+
+					pg_strftime(strfbuf, sizeof(strfbuf),
+							"%Y-%m-%d %H:%M:%S %Z",
+							pg_localtime(&stamp_time, log_timezone));
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, strfbuf);
+					else
+						appendStringInfoString(buf, strfbuf);
+				}
+				break;
+			case 'n':
+				{
+					char	strfbuf[128];
+                                        struct timeval  stamp_timeval;
+
+					gettimeofday(&stamp_timeval, NULL);
+
+					sprintf(strfbuf, "%ld.%03d", stamp_timeval.tv_sec,
+							(int)(stamp_timeval.tv_usec / 1000));
+
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, strfbuf);
+					else
+						appendStringInfoString(buf, strfbuf);
+				}
+				break;
+			case 's':
+				{
+					char    strfbuf[128];
+                                        /* struct timeval  stamp_timeval; */
+					pg_time_t   stamp_time = (pg_time_t) MyStartTime;
+
+					/*
+					 * Note: we expect that guc.c will ensure that log_timezone is set up (at
+					 * least with a minimal GMT value) before Log_line_prefix can become
+					 * nonempty or CSV mode can be selected.
+					 */
+					pg_strftime(strfbuf, FORMATTED_TS_LEN,
+							"%Y-%m-%d %H:%M:%S %Z",
+							pg_localtime(&stamp_time, log_timezone));
+
+                                        /* gettimeofday(&stamp_timeval, NULL); */
+					
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, strfbuf);
+					else
+						appendStringInfoString(buf, strfbuf);
+				}
+				break;
+			case 'i':
+				if (padding != 0)
+					appendStringInfoSpaces(buf,
+						padding > 0 ? padding : -padding);
+				break;
+			case 'r':
+				if (port && port->remote_host)
+				{
+					if (padding != 0)
+					{
+						if (port->remote_port && port->remote_port[0] != '\0')
+						{
+							/*
+							 * This option is slightly special as the port
+							 * number may be appended onto the end. Here we
+							 * need to build 1 string which contains the
+							 * remote_host and optionally the remote_port (if
+							 * set) so we can properly align the string.
+							 */
+
+							char	   hostport[64];
+
+							sprintf(hostport, "%s(%s)", port->remote_host, port->remote_port);
+							appendStringInfo(buf, "%*s", padding, hostport);
+						}
+						else
+							appendStringInfo(buf, "%*s", padding, port->remote_host);
+					}
+					else
+					{
+						/* padding is 0, so we don't need a temp buffer */
+						appendStringInfoString(buf, port->remote_host);
+						if (port->remote_port &&
+							port->remote_port[0] != '\0')
+							appendStringInfo(buf, "(%s)",
+											 port->remote_port);
+					}
+
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
+			case 'h':
+				if (port && port->remote_host)
+				{
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, port->remote_host);
+					else
+						appendStringInfoString(buf, port->remote_host);
+				}
+				else if (padding != 0)
+					appendStringInfoSpaces(buf,
+										   padding > 0 ? padding : -padding);
+				break;
+			case 'q':
+				/* in postmaster and friends, stop if %q is seen */
+				/* in a backend, just ignore */
+				if (port == NULL)
+					return;
+				break;
+			case 'v':
+				if (padding != 0)
+					appendStringInfoSpaces(buf,
+						padding > 0 ? padding : -padding);
+				break;
+			case 'x':
+				if (padding != 0)
+                                        appendStringInfoSpaces(buf,
+                                                padding > 0 ? padding : -padding);
+				break;
+			case 'e':
+				if (padding != 0)
+                                        appendStringInfoSpaces(buf,
+                                                padding > 0 ? padding : -padding);
+				break;
+			default:
+				/* format error - ignore it */
+				break;
+		}
+	}
+}
+/*
  * ClientAuthentication hook: log all failed attemps
  */
 static void
@@ -171,10 +489,11 @@ pglaf_ClientAuthentication(Port *port, int status)
  * Log failed attemps.
  */
 static void
-pglaf_log(const Port *port)
+pglaf_log(Port *port)
 {
-	char *tmp_authmsg = NULL;
-	char *localport;
+	char *localport=NULL;
+        StringInfoData tmp_authmsg;
+        initStringInfo(&tmp_authmsg);
 
 #if PG_VERSION_NUM >= 90600
 	localport = GetConfigOptionByName("port", NULL, false);
@@ -184,29 +503,23 @@ pglaf_log(const Port *port)
 
 	Assert(port != NULL);
 
-	/* Allocate the new string */
-	tmp_authmsg = palloc(60);
+	if (use_log_line_prefix == true )
+	{
+		pglaf_line_prefix(&tmp_authmsg, port);
+	}
 
-	if (tmp_authmsg == NULL)
-		return;
-	/* not sure why this is needed */
-	tmp_authmsg[0] = '\0';
+	appendStringInfo(&tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport);
 
-	sprintf(tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport);
-
-	if (tmp_authmsg != NULL)
+	if (tmp_authmsg.maxlen > 0)
 	{
 		/*
 		 * Write a message line to syslog or elog
 		 * depending on the fact that we opened syslog at the beginning
 		 */
 		if (openlog_done)
-			write_syslog(LOG_ERR, tmp_authmsg);
+			write_syslog(LOG_ERR, tmp_authmsg.data);
 		else
-			elog(LOG, "%s", tmp_authmsg);
-
-		/* Free the log string */
-		pfree(tmp_authmsg);
+			elog(LOG, "%s", tmp_authmsg.data);
 	}
 }
 
