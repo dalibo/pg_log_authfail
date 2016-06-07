@@ -64,7 +64,7 @@ static bool    openlog_done = false;
 static char *  syslog_ident = NULL;
 static int     log_destination = 1; /* aka stderr */
 static int     syslog_facility = LOG_LOCAL0;
-static char *  pglaf_log_line_prefix = "%m app=%a user=%u db=%d from=%r";
+static bool    Use_log_line_prefix = false; /* Don't */
 
 /* Saved hook values in case of unload */
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
@@ -139,11 +139,11 @@ _PG_init(void)
 				NULL,
 				NULL );
 
-	DefineCustomStringVariable( "pg_log_authfail.log_line_prefix",
-				"format for extra log line info.",
+	DefineCustomBoolVariable( "pg_log_authfail.use_log_line_prefix",
+				"Prefix log line as standart log output using pg_log_line_prefix.",
 				NULL,
-				&pglaf_log_line_prefix,
-				pglaf_log_line_prefix,
+				&Use_log_line_prefix,
+				Use_log_line_prefix,
 				PGC_POSTMASTER,
                                 0,
 #if PG_VERSION_NUM >= 90100
@@ -191,12 +191,12 @@ static void
 pglaf_log_line(StringInfo buf, Port *port)
 {
 	/* static counter for line numbers */
-	static long log_line_number = 0;
+	static long	log_line_number = 0;
 
 	/* has counter been reset in current process? */
 	static int	log_my_pid = 0;
-	int			padding;
-	const char *p;
+	int		padding;
+	const char 	*p;
 
 	/*
 	 * This is one of the few places where we'd rather not inherit a static
@@ -211,10 +211,10 @@ pglaf_log_line(StringInfo buf, Port *port)
 	}
 	log_line_number++;
 
-	if (pglaf_log_line_prefix == NULL)
+	if (Log_line_prefix == NULL)
 		return;					/* in case guc hasn't run yet */
 
-	for (p = pglaf_log_line_prefix; *p != '\0'; p++)
+	for (p = Log_line_prefix; *p != '\0'; p++)
 	{
 		if (*p != '%')
 		{
@@ -442,14 +442,24 @@ pglaf_ClientAuthentication(Port *port, int status)
 static void
 pglaf_log(Port *port)
 {
-	/* char tmp_authmsg[256]; */
+	char *localport=NULL;
         StringInfoData tmp_authmsg;
         initStringInfo(&tmp_authmsg);
 
+	#if PG_VERSION_NUM >= 90600
+		localport = GetConfigOptionByName("port", NULL, false);
+	#else
+		localport = GetConfigOptionByName("port", NULL);
+	#endif
+
 	Assert(port != NULL);
 
-	/* sprintf(tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport); */
-	pglaf_log_line(&tmp_authmsg, port);
+	if (Use_log_line_prefix == true )
+	{
+		pglaf_log_line(&tmp_authmsg, port);
+	}
+
+	appendStringInfo(&tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport);
 
 	if (tmp_authmsg.maxlen > 0)
 	{
@@ -460,7 +470,7 @@ pglaf_log(Port *port)
 		if (openlog_done)
 			write_syslog(LOG_ERR, tmp_authmsg.data);
 		else
-			elog(LOG_ERR, "%s", tmp_authmsg.data);
+			elog(LOG, "%s", tmp_authmsg.data);
 	}
 }
 

@@ -11,8 +11,10 @@ The output format looks like :
 
     Failed authentication from X.X.X.X on port Y
 
+Preceded or not by the log_line_prefix format.
+
 The main goal of this tool is to handle those logs with an external tool such
-as fail2ban, without performance issue.
+as fail2ban or Splunk, without performance issue.
 
 
 Installation
@@ -37,28 +39,13 @@ If multiple clusters are located on the server, the same output file can be
 used, as the port is specified. Depending on fail2ban configuration, each
 cluster can be blocked separately or all at the same time.
 
-Escape 	Effect							Session only
-%a 	Application name 					yes
-%u 	User name 						yes
-%d 	Database name 						yes
-%r 	Remote host name or IP address, and remote port 	yes
-%h 	Remote host name or IP address 				yes
-%t 	Time stamp without milliseconds 			no
-%m 	Time stamp with milliseconds 				no
-%l 	Number of the log line for each session or process,	no
-        starting at 1
-%q 	Produces no output, but tells non-session processes to	no
-	stop at this point in the string; ignored by session
-	processes
-%% 	Literal % 						no
-
 **postgresql.conf**
 -------------------
 
     shared_preload_library = 'pg_log_authfail'
     pg_log_authfail.log_destination = syslog
     pg_log_authfail.syslog_ident = pgsql
-    pg_log_authfail.log_line_prefix = "%m application=%a user=%u db=%d from=%r PG%e" 
+    pg_log_authfail.use_log_line_prefix = false
 
 
 **syslog.conf**
