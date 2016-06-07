@@ -446,11 +446,11 @@ pglaf_log(Port *port)
         StringInfoData tmp_authmsg;
         initStringInfo(&tmp_authmsg);
 
-	#if PG_VERSION_NUM >= 90600
-		localport = GetConfigOptionByName("port", NULL, false);
-	#else
-		localport = GetConfigOptionByName("port", NULL);
-	#endif
+#if PG_VERSION_NUM >= 90600
+	localport = GetConfigOptionByName("port", NULL, false);
+#else
+	localport = GetConfigOptionByName("port", NULL);
+#endif
 
 	Assert(port != NULL);
 
