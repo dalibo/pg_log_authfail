@@ -7,18 +7,6 @@
  * Copyright (c) 2013, Julien Rouhaud (Dalibo),
  * julien.rouhaud@dalibo.com
  *
- * log_line_prefix format:
- * %a 	Application name
- * %u 	User name
- * %d 	Database name
- * %r 	Remote host name or IP address
- * %h 	Remote host name or IP address
- * %t 	Time stamp without milliseconds
- * %m 	Time stamp with milliseconds
- * %l 	Number of the log line for each session or process, starting at 1
- * %q 	Produces no output, but tells non-session processes to stop at this
- *      point in the string; ignored by session processes
- * %% 	Literal %
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -144,7 +132,7 @@ _PG_init(void)
 				NULL,
 				&use_log_line_prefix,
 				use_log_line_prefix,
-				PGC_POSTMASTER,
+				PGC_SIGHUP,
                                 0,
 #if PG_VERSION_NUM >= 90100
                                 NULL,
@@ -188,7 +176,7 @@ _PG_fini(void)
  * Copied from log_line_prefix in elog.c but using pg_log_authfail prefix
  */
 static void
-pglaf_log_line(StringInfo buf, Port *port)
+pglaf_line_prefix(StringInfo buf, Port *port)
 {
 	/* static counter for line numbers */
 	static long	log_line_number = 0;
@@ -302,6 +290,24 @@ pglaf_log_line(StringInfo buf, Port *port)
 					appendStringInfoSpaces(buf,
 										   padding > 0 ? padding : -padding);
 				break;
+			case 'c':
+				if (padding != 0)
+				{
+					char        strfbuf[128];
+
+					snprintf(strfbuf, sizeof(strfbuf) - 1, "%lx.%x",
+						(long) (MyStartTime), MyProcPid);
+					appendStringInfo(buf, "%*s", padding, strfbuf);
+				}
+				else
+					appendStringInfo(buf, "%lx.%x", (long) (MyStartTime), MyProcPid);
+				break;
+			case 'p':
+				if (padding != 0)
+					appendStringInfo(buf, "%*d", padding, MyProcPid);
+				else
+					appendStringInfo(buf, "%d", MyProcPid);
+				break;
 			case 'l':
 				if (padding != 0)
 					appendStringInfo(buf, "%*ld", padding, log_line_number);
@@ -360,6 +366,34 @@ pglaf_log_line(StringInfo buf, Port *port)
 						appendStringInfoString(buf, strfbuf);
 				}
 				break;
+			case 's':
+				{
+					char    strfbuf[128];
+                                        /* struct timeval  stamp_timeval; */
+					pg_time_t   stamp_time = (pg_time_t) MyStartTime;
+
+					/*
+					 * Note: we expect that guc.c will ensure that log_timezone is set up (at
+					 * least with a minimal GMT value) before Log_line_prefix can become
+					 * nonempty or CSV mode can be selected.
+					 */
+					pg_strftime(strfbuf, FORMATTED_TS_LEN,
+							"%Y-%m-%d %H:%M:%S %Z",
+							pg_localtime(&stamp_time, log_timezone));
+
+                                        /* gettimeofday(&stamp_timeval, NULL); */
+					
+					if (padding != 0)
+						appendStringInfo(buf, "%*s", padding, strfbuf);
+					else
+						appendStringInfoString(buf, strfbuf);
+				}
+				break;
+			case 'i':
+				if (padding != 0)
+					appendStringInfoSpaces(buf,
+						padding > 0 ? padding : -padding);
+				break;
 			case 'r':
 				if (port && port->remote_host)
 				{
@@ -416,6 +450,21 @@ pglaf_log_line(StringInfo buf, Port *port)
 				if (port == NULL)
 					return;
 				break;
+			case 'v':
+				if (padding != 0)
+					appendStringInfoSpaces(buf,
+						padding > 0 ? padding : -padding);
+				break;
+			case 'x':
+				if (padding != 0)
+                                        appendStringInfoSpaces(buf,
+                                                padding > 0 ? padding : -padding);
+				break;
+			case 'e':
+				if (padding != 0)
+                                        appendStringInfoSpaces(buf,
+                                                padding > 0 ? padding : -padding);
+				break;
 			default:
 				/* format error - ignore it */
 				break;
@@ -456,7 +505,7 @@ pglaf_log(Port *port)
 
 	if (use_log_line_prefix == true )
 	{
-		pglaf_log_line(&tmp_authmsg, port);
+		pglaf_line_prefix(&tmp_authmsg, port);
 	}
 
 	appendStringInfo(&tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport);
