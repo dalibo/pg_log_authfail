@@ -1,8 +1,8 @@
 {
 	"name": "pg_log_authfail",
 	"abstract": "Module to log failed connection attemps.",
-	"description": "pg_log_authfail is a PostgreSQL module that logs each failed connection attempt in a separate log file, in order to be handled by an external tool such as fail2ban, without performance issue.",
-	"version": "1.0",
+	"description": "pg_log_authfail is a PostgreSQL module that logs each failed connection attempt in a separate log file, in order to be handled by an external tool such as fail2ban or Splunk, without performance issue.",
+	"version": "1.1",
 	"maintainer": "Julien Rouhaud <julien.rouhaud@dalibo.com>",
 	"license": {
 		"PostgreSQL": "http://www.postgresql.org/about/licence"
@@ -18,7 +18,7 @@
 	"provides": {
 		"pg_log_authfail": {
 			"file": "pg_log_authfail.so",
-			"version": "1.0"
+			"version": "1.1"
 		}
 	},
 	"meta-spec": {
