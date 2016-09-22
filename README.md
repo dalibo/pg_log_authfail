@@ -46,6 +46,7 @@ cluster can be blocked separately or all at the same time.
     pg_log_authfail.log_destination = syslog
     pg_log_authfail.syslog_ident = pgsql
     pg_log_authfail.use_log_line_prefix = false
+    pg_log_authfail.all_authent = false
 
 
 **syslog.conf**
