@@ -28,5 +28,8 @@ You'll be able to set the two following parameters:
 * pg_log_authfail.syslog_facility: configure syslog_facility in case of syslog destination.
 * pg_log_authfail.syslog_ident: configure syslog_ident in case of syslog destination.
 * pg_log_authfail.use_log_line_prefix: default to false but if true, preprend log_line_prefix to output.
+* pg_log_authfail.log_success: default to false but if true, log authorized attempts too.
+* pg_log_authfail.log_aborted: default to false but if true, log aborted (eof) attempts too.
 
-Once this configuration is done, restart PostgreSQL.
+Once this configuration is done, restart PostgreSQL if you modified the
+shared_preload_libraries parameter, otherwise a reload is enough.

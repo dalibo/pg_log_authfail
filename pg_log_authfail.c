@@ -28,10 +28,13 @@ PG_MODULE_MAGIC;
 
 #define FORMATTED_TS_LEN 128
 
+#define PGLAF_STDERR 1
+#define PGLAF_SYSLOG 2
+
 /*---- Local variables ----*/
 static const struct config_enum_entry log_destination_options[] = {
-	{"stderr", 1, false},
-	{"syslog", 2, false},
+	{"stderr", PGLAF_STDERR, false},
+	{"syslog", PGLAF_SYSLOG, false},
 	{NULL, 0}
 };
 
@@ -48,11 +51,13 @@ static const struct config_enum_entry syslog_facility_options[] = {
 };
 
 
-static bool    openlog_done = false;
-static char *  syslog_ident = NULL;
-static int     log_destination = 1; /* aka stderr */
-static int     syslog_facility = LOG_LOCAL0;
-static bool    use_log_line_prefix = false; /* Don't */
+static bool		openlog_done = false;
+static char	   *syslog_ident = NULL;
+static int		log_destination = PGLAF_STDERR;
+static int		syslog_facility = LOG_LOCAL0;
+static bool		use_log_line_prefix = false; /* Don't prepend log_line_prefix */
+static bool		log_success = false; /* Don't log successful attemtps */
+static bool		log_abort = false; /* Don't log aborted attemtps */
 
 /* Saved hook values in case of unload */
 static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
@@ -62,11 +67,17 @@ static ClientAuthentication_hook_type prev_ClientAuthentication = NULL;
 void		_PG_init(void);
 void		_PG_fini(void);
 
-static void pglaf_ClientAuthentication(Port *port, int status);
-static void pglaf_log(Port *port);
-static void write_syslog(int level, char *line);
+static void assign_pglaf_destination(int newval, void *extra);
+static void assign_pglaf_facility(int newval, void *extra);
+static void assign_pglaf_ident(const char *newval, void *extra);
 
-extern int pg_mbcliplen(const char *mbstr, int len, int limit);
+static void pglaf_line_prefix(StringInfo buf, Port *port);
+static void pglaf_ClientAuthentication(Port *port, int status);
+static void pglaf_log(Port *port, const char *prefix);
+static void write_syslog(int level, char *line);
+static void start_syslog(void);
+static void stop_syslog(void);
+static void restart_syslog(void);
 
 /*
  * Module load callback
@@ -94,37 +105,39 @@ _PG_init(void)
 				&log_destination,
 				log_destination,
 				log_destination_options,
-				PGC_POSTMASTER,
+				PGC_SIGHUP,
 				0,
 #if PG_VERSION_NUM >= 90100
 				NULL,
 #endif
-				NULL,
+				assign_pglaf_destination,
 				NULL);
+
 	DefineCustomEnumVariable( "pg_log_authfail.syslog_facility",
 				"Selects syslog level of log (same options than PostgreSQL syslog_facility).",
 				NULL,
 				&syslog_facility,
 				syslog_facility,
 				syslog_facility_options,
-				PGC_POSTMASTER,
+				PGC_SIGHUP,
 				0,
 #if PG_VERSION_NUM >= 90100
 				NULL,
 #endif
-				NULL,
+				assign_pglaf_facility,
 				NULL);
+
 	DefineCustomStringVariable( "pg_log_authfail.syslog_ident",
 				"Select syslog program identity name.",
 				NULL,
 				&syslog_ident,
 				"pg_log_authfail",
-				PGC_POSTMASTER,
+				PGC_SIGHUP,
 				0,
 #if PG_VERSION_NUM >= 90100
 				NULL,
 #endif
-				NULL,
+				assign_pglaf_ident,
 				NULL );
 
 	DefineCustomBoolVariable( "pg_log_authfail.use_log_line_prefix",
@@ -140,12 +153,37 @@ _PG_init(void)
 				NULL,
 				NULL );
 
-	if (log_destination == 2 /* aka syslog */)
-	{
+	DefineCustomBoolVariable( "pg_log_authfail.log_success",
+				"If true, also trace successful connection attempts.",
+				NULL,
+				&log_success,
+				log_success,
+				PGC_SIGHUP,
+				0,
+#if PG_VERSION_NUM >= 90100
+				NULL,
+#endif
+				NULL,
+				NULL );
+
+	DefineCustomBoolVariable( "pg_log_authfail.log_abort",
+				"If true, also trace aborted (eof) connection attempts.",
+				NULL,
+				&log_abort,
+				log_abort,
+				PGC_SIGHUP,
+				0,
+#if PG_VERSION_NUM >= 90100
+				NULL,
+#endif
+				NULL,
+				NULL );
+
+#ifdef HAVE_SYSLOG
+	if (log_destination == PGLAF_SYSLOG)
 		/* Open syslog descriptor */
-		openlog(syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT, syslog_facility);
-		openlog_done = true;
-	}
+		start_syslog();
+#endif
 
 	/*
 	 * Install hooks.
@@ -161,14 +199,58 @@ void
 _PG_fini(void)
 {
 	/* Close syslog descriptor, if required */
-	if (openlog_done)
-	{
-		closelog();
-		openlog_done = false;
-	}
+	stop_syslog();
 
 	/* Uninstall hooks. */
 	ClientAuthentication_hook = prev_ClientAuthentication;
+}
+
+/*
+ * Assign hook for syslog descriptor, destination changed. Open or close syslog
+ * as needed.
+ */
+static void
+assign_pglaf_destination(int newval, void *extra)
+{
+#ifdef HAVE_SYSLOG
+	if (newval == PGLAF_SYSLOG && log_destination != PGLAF_SYSLOG)
+		/* switching to syslog */
+		start_syslog();
+	else if (newval != PGLAF_SYSLOG && log_destination == PGLAF_SYSLOG)
+		/* switching from syslog to stderr */
+		stop_syslog();
+#endif
+	/* without syslog support, just ignore it */
+}
+
+/*
+ * Assign hook for syslog descriptor, facility changed. Restart syslog if needed
+ */
+static void
+assign_pglaf_facility(int newval, void *extra)
+{
+#ifdef HAVE_SYSLOG
+	syslog_facility = newval;
+
+	if (log_destination == PGLAF_SYSLOG)
+		restart_syslog();
+#endif
+	/* without syslog support, just ignore it */
+}
+
+/*
+ * Assign hook for syslog descriptor, ident changed. Restart syslog if needed
+ */
+static void
+assign_pglaf_ident(const char *newval, void *extra)
+{
+#ifdef HAVE_SYSLOG
+	syslog_ident = (char *) newval;
+
+	if (log_destination == PGLAF_SYSLOG)
+		restart_syslog();
+#endif
+	/* without syslog support, just ignore it */
 }
 
 /*-------------------------------
@@ -476,10 +558,27 @@ pglaf_line_prefix(StringInfo buf, Port *port)
 static void
 pglaf_ClientAuthentication(Port *port, int status)
 {
-	if ( status == STATUS_ERROR )
+	switch (status)
 	{
-		pglaf_log(port);
+		case STATUS_OK:
+			if (log_success)
+				pglaf_log(port, "Successful");
+			break;
+
+		case STATUS_ERROR:
+				pglaf_log(port, "Failed");
+			break;
+
+		case STATUS_EOF:
+			if (log_abort)
+				pglaf_log(port, "Aborted");
+			break;
+
+		default:
+				pglaf_log(port, "UNKNOWN");
+			break;
 	}
+
 	if (prev_ClientAuthentication)
 		prev_ClientAuthentication(port, status);
 }
@@ -488,7 +587,7 @@ pglaf_ClientAuthentication(Port *port, int status)
  * Log failed attemps.
  */
 static void
-pglaf_log(Port *port)
+pglaf_log(Port *port, const char *prefix)
 {
 	char *localport=NULL;
 	StringInfoData tmp_authmsg;
@@ -508,15 +607,16 @@ pglaf_log(Port *port)
 		pglaf_line_prefix(&tmp_authmsg, port);
 	}
 
-	appendStringInfo(&tmp_authmsg, "Failed authentication from %s on port %s", port->remote_host, localport);
+	appendStringInfo(&tmp_authmsg, "%s authentication from %s on port %s",
+			prefix, port->remote_host, localport);
 
-	if (tmp_authmsg.maxlen > 0)
+	if (tmp_authmsg.len > 0)
 	{
 		/*
-		 * Write a message line to syslog or elog
-		 * depending on the fact that we opened syslog at the beginning
+		 * Write a message line to syslog or elog depending on the current
+		 * log_destination
 		 */
-		if (openlog_done)
+		if (log_destination == PGLAF_SYSLOG)
 			write_syslog(LOG_ERR, tmp_authmsg.data);
 		else
 			elog(LOG, "%s", tmp_authmsg.data);
@@ -614,4 +714,36 @@ write_syslog(int level, char *line)
 		/* message short enough */
 		syslog(level, "[%lu] %s", seq, line);
 	}
+}
+
+static void
+start_syslog(void)
+{
+#ifdef HAVE_SYSLOG
+	if (!openlog_done)
+	{
+		openlog(syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT, syslog_facility);
+		openlog_done = true;
+	}
+#endif
+}
+
+static void
+stop_syslog(void)
+{
+#ifdef HAVE_SYSLOG
+	if (openlog_done)
+	{
+		closelog();
+		openlog_done = false;
+	}
+#endif
+}
+
+static void restart_syslog(void)
+{
+#ifdef HAVE_SYSLOG
+	stop_syslog();
+	start_syslog();
+#endif
 }
